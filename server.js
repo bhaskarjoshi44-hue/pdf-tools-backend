@@ -10,13 +10,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// RAM बचाने के लिए Memory Storage
-const upload = multer({ 
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 20 * 1024 * 1024 } // 20MB Limit
-});
+const upload = multer({ storage: multer.memoryStorage() });
 
-// 1. --- MERGE PDF ---
+// --- 1. MERGE PDF (Updated) ---
 app.post('/merge-pdf', upload.array('files'), async (req, res) => {
     try {
         const mergedPdf = await PDFDocument.create();
@@ -26,66 +22,51 @@ app.post('/merge-pdf', upload.array('files'), async (req, res) => {
             pages.forEach(page => mergedPdf.addPage(page));
         }
         const pdfBytes = await mergedPdf.save();
-        res.contentType("application/pdf");
+        res.setHeader('Content-Type', 'application/pdf');
         res.send(Buffer.from(pdfBytes));
-    } catch (err) { res.status(500).send("Merge Error: " + err.message); }
+    } catch (err) { res.status(500).send("Error merging PDFs"); }
 });
 
-// 2. --- SPLIT PDF (First 5 pages for example) ---
-app.post('/split-pdf', upload.single('file'), async (req, res) => {
-    try {
-        const pdf = await PDFDocument.load(req.file.buffer);
-        const newPdf = await PDFDocument.create();
-        const pages = await newPdf.copyPages(pdf, [0]); // सिर्फ पहला पेज उदहारण के लिए
-        newPdf.addPage(pages[0]);
-        const pdfBytes = await newPdf.save();
-        res.contentType("application/pdf");
-        res.send(Buffer.from(pdfBytes));
-    } catch (err) { res.status(500).send("Split Error"); }
-});
-
-// 3. --- COMPRESS PDF (Basic Optimization) ---
+// --- 2. COMPRESS PDF ---
 app.post('/compress-pdf', upload.single('file'), async (req, res) => {
     try {
         const pdf = await PDFDocument.load(req.file.buffer);
-        // pdf-lib में compression सीमित है, यह उसे दोबारा सेव करके ऑप्टिमाइज़ करता है
         const pdfBytes = await pdf.save({ useObjectStreams: true });
-        res.contentType("application/pdf");
+        res.setHeader('Content-Type', 'application/pdf');
         res.send(Buffer.from(pdfBytes));
-    } catch (err) { res.status(500).send("Compress Error"); }
+    } catch (err) { res.status(500).send("Error compressing PDF"); }
 });
 
-// 4. --- IMAGE TO OCR (Text) ---
+// --- 3. SPLIT PDF (Extract 1st Page) ---
+app.post('/split-pdf', upload.single('file'), async (req, res) => {
+    try {
+        const pdf = await PDFDocument.load(req.file.buffer);
+        const newDoc = await PDFDocument.create();
+        const [firstPage] = await newDoc.copyPages(pdf, [0]);
+        newDoc.addPage(firstPage);
+        const pdfBytes = await newDoc.save();
+        res.setHeader('Content-Type', 'application/pdf');
+        res.send(Buffer.from(pdfBytes));
+    } catch (err) { res.status(500).send("Error splitting PDF"); }
+});
+
+// --- 4. IMAGE TO OCR (Returns Text JSON) ---
 app.post('/ocr', upload.single('file'), async (req, res) => {
     try {
-        const { data: { text } } = await Tesseract.recognize(req.file.buffer, 'eng');
-        res.json({ text });
-    } catch (err) { res.status(500).send("OCR Error"); }
+        const result = await Tesseract.recognize(req.file.buffer, 'eng');
+        res.json({ text: result.data.text }); // OCR हमेशा JSON देगा
+    } catch (err) { res.status(500).json({ error: "OCR Failed" }); }
 });
 
-// 5. --- PDF TO JPG (The one causing Timeout) ---
+// --- 5. PDF TO JPG ---
 app.post('/pdf-to-jpg', upload.single('file'), async (req, res) => {
     try {
-        console.log("Conversion started...");
-        // Scale 1.2 रखने से RAM कम खर्च होगी और Timeout नहीं होगा
         const images = await pdf2img.convert(req.file.buffer, { scale: 1.2 });
-        
         const zip = new AdmZip();
-        images.forEach((img, i) => {
-            zip.addFile(`page_${i + 1}.jpg`, img);
-        });
-
-        const zipBuffer = zip.toBuffer();
-        res.set({
-            'Content-Type': 'application/zip',
-            'Content-Disposition': 'attachment; filename=images.zip',
-            'Content-Length': zipBuffer.length
-        });
-        res.send(zipBuffer);
-    } catch (err) { 
-        console.error(err);
-        res.status(500).send("PDF to JPG Error"); 
-    }
+        images.forEach((img, i) => zip.addFile(`page_${i+1}.jpg`, img));
+        res.setHeader('Content-Type', 'application/zip');
+        res.send(zip.toBuffer());
+    } catch (err) { res.status(500).send("Error converting PDF"); }
 });
 
 const PORT = process.env.PORT || 3000;
